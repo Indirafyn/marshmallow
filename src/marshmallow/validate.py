@@ -361,22 +361,22 @@ class Range(Validator):
     def _format_error(self, value: _T, message: str) -> str:
         return (self.error or message).format(input=value, min=self.min, max=self.max)
 
+    def _min_failed(self, candidate: typing.Any, minimum: typing.Any) -> bool:
+        return candidate < minimum if self.min_inclusive else candidate <= minimum
+
+    def _max_failed(self, candidate: typing.Any, maximum: typing.Any) -> bool:
+        return candidate > maximum if self.max_inclusive else candidate >= maximum
+
     def __call__(self, value: _T) -> _T:
         return _validate_min_max(
             measured_value=value,
             error_value=value,
             minimum=self.min,
             maximum=self.max,
-            min_failed=(
-                (lambda candidate, minimum: candidate < minimum)
-                if self.min_inclusive
-                else (lambda candidate, minimum: candidate <= minimum)
-            ),
-            max_failed=(
-                (lambda candidate, maximum: candidate > maximum)
-                if self.max_inclusive
-                else (lambda candidate, maximum: candidate >= maximum)
-            ),
+            has_minimum=self.min is not None,
+            has_maximum=self.max is not None,
+            min_failed=self._min_failed,
+            max_failed=self._max_failed,
             min_message=self.message_min,
             max_message=self.message_max,
             both_message=self.message_all,
@@ -393,8 +393,10 @@ def _validate_min_max(
     *,
     measured_value: typing.Any,
     error_value: typing.Any,
-    minimum: typing.Any = None,
-    maximum: typing.Any = None,
+    minimum: typing.Any,
+    maximum: typing.Any,
+    has_minimum: bool,
+    has_maximum: bool,
     min_failed: typing.Callable[[typing.Any, typing.Any], bool],
     max_failed: typing.Callable[[typing.Any, typing.Any], bool],
     min_message: str,
@@ -402,12 +404,13 @@ def _validate_min_max(
     both_message: str,
     format_error: typing.Callable[[typing.Any, str], str],
 ):
-    if minimum is not None and min_failed(measured_value, minimum):
-        message = min_message if maximum is None else both_message
+    """Run shared min/max validation flow and raise ``ValidationError`` on bounds failures."""
+    if has_minimum and min_failed(measured_value, minimum):
+        message = min_message if not has_maximum else both_message
         raise ValidationError(format_error(error_value, message))
 
-    if maximum is not None and max_failed(measured_value, maximum):
-        message = max_message if minimum is None else both_message
+    if has_maximum and max_failed(measured_value, maximum):
+        message = max_message if not has_minimum else both_message
         raise ValidationError(format_error(error_value, message))
 
     return error_value
@@ -473,6 +476,8 @@ class Length(Validator):
             error_value=value,
             minimum=self.min,
             maximum=self.max,
+            has_minimum=self.min is not None,
+            has_maximum=self.max is not None,
             min_failed=lambda candidate, minimum: candidate < minimum,
             max_failed=lambda candidate, maximum: candidate > maximum,
             min_message=self.message_min,

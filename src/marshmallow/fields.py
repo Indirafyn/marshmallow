@@ -1681,7 +1681,9 @@ class Mapping(Field[_MappingT], metaclass=abc.ABCMeta):
 
     # Refactoring type: Extract Method
     # Change: Moved key deserialization branching and error handling out of `_deserialize`.
-    def _deserialize_keys(self, value, errors, **kwargs) -> dict[typing.Any, typing.Any]:
+    def _deserialize_keys(
+        self, value, errors, **kwargs
+    ) -> dict[typing.Any, typing.Any]:
         if self.key_field is None:
             return {key: key for key in value}
         keys = {}
@@ -1815,14 +1817,15 @@ class Email(String):
 
 # Refactoring type: Extract Superclass (implemented as a shared mixin)
 # Change: Pulled up common init/serialize/deserialize logic for IP-like fields.
-class _BaseIPField:
+class BaseIPField:
+    """Shared mixin for IP-like fields with common exploded and deserialization behavior."""
+
     DESERIALIZATION_CLASS: type | None = None
-    DESERIALIZE_FALLBACK: typing.Callable[[str], typing.Any]
-    _invalid_error_key: str
+    DESERIALIZE_FALLBACK: typing.Callable[..., typing.Any] | None = None
+    INVALID_ERROR_KEY: str | None = None
     exploded: bool
 
-    def __init__(self, *, exploded: bool = False, **kwargs: Unpack[_BaseFieldKwargs]):
-        super().__init__(**kwargs)
+    def _init_exploded(self, *, exploded: bool) -> None:
         self.exploded = exploded
 
     def _serialize(self, value, attr, obj, **kwargs) -> str | None:
@@ -1831,14 +1834,20 @@ class _BaseIPField:
         return value.exploded if self.exploded else value.compressed
 
     def _deserialize(self, value, attr, data, **kwargs):
+        deserializer = self.DESERIALIZATION_CLASS or self.DESERIALIZE_FALLBACK
+        if deserializer is None or self.INVALID_ERROR_KEY is None:
+            msg = (
+                "IP field subclasses must define DESERIALIZATION_CLASS or "
+                "DESERIALIZE_FALLBACK (at least one) and define INVALID_ERROR_KEY."
+            )
+            raise TypeError(msg)
         try:
-            deserializer = self.DESERIALIZATION_CLASS or self.DESERIALIZE_FALLBACK
             return deserializer(utils.ensure_text_type(value))
         except (ValueError, TypeError) as error:
-            raise self.make_error(self._invalid_error_key) from error
+            raise self.make_error(self.INVALID_ERROR_KEY) from error
 
 
-class IP(_BaseIPField, Field[ipaddress.IPv4Address | ipaddress.IPv6Address]):
+class IP(BaseIPField, Field[ipaddress.IPv4Address | ipaddress.IPv6Address]):
     """A IP address field.
 
     :param exploded: If `True`, serialize ipv6 address in long form, ie. with groups
@@ -1848,9 +1857,12 @@ class IP(_BaseIPField, Field[ipaddress.IPv4Address | ipaddress.IPv6Address]):
     """
 
     default_error_messages = {"invalid_ip": "Not a valid IP address."}
+    DESERIALIZE_FALLBACK = staticmethod(ipaddress.ip_address)
+    INVALID_ERROR_KEY = "invalid_ip"
 
-    DESERIALIZE_FALLBACK = ipaddress.ip_address
-    _invalid_error_key = "invalid_ip"
+    def __init__(self, *, exploded: bool = False, **kwargs: Unpack[_BaseFieldKwargs]):
+        super().__init__(**kwargs)
+        self._init_exploded(exploded=exploded)
 
 
 class IPv4(IP):
@@ -1875,7 +1887,9 @@ class IPv6(IP):
     DESERIALIZATION_CLASS = ipaddress.IPv6Address
 
 
-class IPInterface(_BaseIPField, Field[ipaddress.IPv4Interface | ipaddress.IPv6Interface]):
+class IPInterface(
+    BaseIPField, Field[ipaddress.IPv4Interface | ipaddress.IPv6Interface]
+):
     """A IPInterface field.
 
     IP interface is the non-strict form of the IPNetwork type where arbitrary host
@@ -1890,9 +1904,12 @@ class IPInterface(_BaseIPField, Field[ipaddress.IPv4Interface | ipaddress.IPv6In
     """
 
     default_error_messages = {"invalid_ip_interface": "Not a valid IP interface."}
+    DESERIALIZE_FALLBACK = staticmethod(ipaddress.ip_interface)
+    INVALID_ERROR_KEY = "invalid_ip_interface"
 
-    DESERIALIZE_FALLBACK = ipaddress.ip_interface
-    _invalid_error_key = "invalid_ip_interface"
+    def __init__(self, *, exploded: bool = False, **kwargs: Unpack[_BaseFieldKwargs]):
+        super().__init__(**kwargs)
+        self._init_exploded(exploded=exploded)
 
 
 class IPv4Interface(IPInterface):

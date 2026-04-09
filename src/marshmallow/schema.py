@@ -556,7 +556,12 @@ class Schema(metaclass=SchemaMeta):
     # Refactoring type: Decompose Conditional
     # Change: Consolidated missing-field skip decision to reduce nested branching.
     def _should_skip_missing_field(
-        self, raw_value: typing.Any, *, partial, partial_is_collection: bool, attr_name: str
+        self,
+        raw_value: typing.Any,
+        *,
+        partial,
+        partial_is_collection: bool,
+        attr_name: str,
     ) -> bool:
         if raw_value is not missing:
             return False
@@ -571,7 +576,9 @@ class Schema(metaclass=SchemaMeta):
             prefix = f"{attr_name}."
             len_prefix = len(prefix)
             return {
-                "partial": [field[len_prefix:] for field in partial if field.startswith(prefix)]
+                "partial": [
+                    field[len_prefix:] for field in partial if field.startswith(prefix)
+                ]
             }
         if partial is not None:
             return {"partial": partial}
