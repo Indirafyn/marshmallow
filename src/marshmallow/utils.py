@@ -111,11 +111,12 @@ def get_value(obj, key: int | str, default=missing):
 
 
 def _get_value_for_keys(obj, keys, default):
-    if len(keys) == 1:
-        return _get_value_for_key(obj, keys[0], default)
-    return _get_value_for_keys(
-        _get_value_for_key(obj, keys[0], default), keys[1:], default
-    )
+    # Refactoring type: Replace Recursion with Iteration
+    # Change: Replaced recursive key traversal with a simple iterative loop.
+    current = obj
+    for key in keys:
+        current = _get_value_for_key(current, key, default)
+    return current
 
 
 def _get_value_for_key(obj, key, default):

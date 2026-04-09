@@ -361,23 +361,59 @@ class Range(Validator):
     def _format_error(self, value: _T, message: str) -> str:
         return (self.error or message).format(input=value, min=self.min, max=self.max)
 
+    def _min_failed(self, candidate: typing.Any, minimum: typing.Any) -> bool:
+        return candidate < minimum if self.min_inclusive else candidate <= minimum
+
+    def _max_failed(self, candidate: typing.Any, maximum: typing.Any) -> bool:
+        return candidate > maximum if self.max_inclusive else candidate >= maximum
+
     def __call__(self, value: _T) -> _T:
-        if self.min is not None and (
-            value < self.min if self.min_inclusive else value <= self.min
-        ):
-            message = self.message_min if self.max is None else self.message_all
-            raise ValidationError(self._format_error(value, message))
-
-        if self.max is not None and (
-            value > self.max if self.max_inclusive else value >= self.max
-        ):
-            message = self.message_max if self.min is None else self.message_all
-            raise ValidationError(self._format_error(value, message))
-
-        return value
+        return _validate_min_max(
+            measured_value=value,
+            error_value=value,
+            minimum=self.min,
+            maximum=self.max,
+            has_minimum=self.min is not None,
+            has_maximum=self.max is not None,
+            min_failed=self._min_failed,
+            max_failed=self._max_failed,
+            min_message=self.message_min,
+            max_message=self.message_max,
+            both_message=self.message_all,
+            format_error=self._format_error,
+        )
 
 
 _SizedT = typing.TypeVar("_SizedT", bound=typing.Sized)
+
+
+# Refactoring type: Template Method (shared validation flow)
+# Change: Extracted the common min/max validation algorithm used by Range and Length.
+def _validate_min_max(
+    *,
+    measured_value: typing.Any,
+    error_value: typing.Any,
+    minimum: typing.Any,
+    maximum: typing.Any,
+    has_minimum: bool,
+    has_maximum: bool,
+    min_failed: typing.Callable[[typing.Any, typing.Any], bool],
+    max_failed: typing.Callable[[typing.Any, typing.Any], bool],
+    min_message: str,
+    max_message: str,
+    both_message: str,
+    format_error: typing.Callable[[typing.Any, str], str],
+):
+    """Run shared min/max validation flow and raise ``ValidationError`` on bounds failures."""
+    if has_minimum and min_failed(measured_value, minimum):
+        message = min_message if not has_maximum else both_message
+        raise ValidationError(format_error(error_value, message))
+
+    if has_maximum and max_failed(measured_value, maximum):
+        message = max_message if not has_minimum else both_message
+        raise ValidationError(format_error(error_value, message))
+
+    return error_value
 
 
 class Length(Validator):
@@ -435,15 +471,20 @@ class Length(Validator):
                 raise ValidationError(self._format_error(value, self.message_equal))
             return value
 
-        if self.min is not None and length < self.min:
-            message = self.message_min if self.max is None else self.message_all
-            raise ValidationError(self._format_error(value, message))
-
-        if self.max is not None and length > self.max:
-            message = self.message_max if self.min is None else self.message_all
-            raise ValidationError(self._format_error(value, message))
-
-        return value
+        return _validate_min_max(
+            measured_value=length,
+            error_value=value,
+            minimum=self.min,
+            maximum=self.max,
+            has_minimum=self.min is not None,
+            has_maximum=self.max is not None,
+            min_failed=lambda candidate, minimum: candidate < minimum,
+            max_failed=lambda candidate, maximum: candidate > maximum,
+            min_message=self.message_min,
+            max_message=self.message_max,
+            both_message=self.message_all,
+            format_error=self._format_error,
+        )
 
 
 class Equal(Validator):
