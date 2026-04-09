@@ -1657,31 +1657,69 @@ class Mapping(Field[_MappingT], metaclass=abc.ABCMeta):
             self.key_field = copy.deepcopy(self.key_field)
             self.key_field._bind_to_schema(field_name, self)
 
+    # Refactoring type: Extract Method
+    # Change: Moved key serialization branching out of `_serialize`.
+    def _serialize_keys(self, value, **kwargs) -> dict[typing.Any, typing.Any]:
+        if self.key_field is None:
+            return {key: key for key in value}
+        return {
+            key: self.key_field._serialize(key, None, None, **kwargs) for key in value
+        }
+
+    # Refactoring type: Extract Method
+    # Change: Moved value serialization loop out of `_serialize`.
+    def _serialize_values(self, value, keys, **kwargs):
+        result = self.mapping_type()
+        if self.value_field is None:
+            for key, val in value.items():
+                if key in keys:
+                    result[keys[key]] = val
+            return result
+        for key, val in value.items():
+            result[keys[key]] = self.value_field._serialize(val, None, None, **kwargs)
+        return result
+
+    # Refactoring type: Extract Method
+    # Change: Moved key deserialization branching and error handling out of `_deserialize`.
+    def _deserialize_keys(self, value, errors, **kwargs) -> dict[typing.Any, typing.Any]:
+        if self.key_field is None:
+            return {key: key for key in value}
+        keys = {}
+        for key in value:
+            try:
+                keys[key] = self.key_field.deserialize(key, **kwargs)
+            except ValidationError as error:
+                errors[key]["key"] = error.messages
+        return keys
+
+    # Refactoring type: Extract Method
+    # Change: Moved value deserialization and partial valid-data handling out of `_deserialize`.
+    def _deserialize_values(self, value, keys, errors, **kwargs):
+        result = self.mapping_type()
+        if self.value_field is None:
+            for key, val in value.items():
+                if key in keys:
+                    result[keys[key]] = val
+            return result
+        for key, val in value.items():
+            try:
+                deser_val = self.value_field.deserialize(val, **kwargs)
+            except ValidationError as error:
+                errors[key]["value"] = error.messages
+                if error.valid_data is not None and key in keys:
+                    result[keys[key]] = error.valid_data
+            else:
+                if key in keys:
+                    result[keys[key]] = deser_val
+        return result
+
     def _serialize(self, value, attr, obj, **kwargs):
         if value is None:
             return None
         if not self.value_field and not self.key_field:
             return self.mapping_type(value)
-
-        # Serialize keys
-        if self.key_field is None:
-            keys = {k: k for k in value}
-        else:
-            keys = {
-                k: self.key_field._serialize(k, None, None, **kwargs) for k in value
-            }
-
-        # Serialize values
-        result = self.mapping_type()
-        if self.value_field is None:
-            for k, v in value.items():
-                if k in keys:
-                    result[keys[k]] = v
-        else:
-            for k, v in value.items():
-                result[keys[k]] = self.value_field._serialize(v, None, None, **kwargs)
-
-        return result
+        keys = self._serialize_keys(value, **kwargs)
+        return self._serialize_values(value, keys, **kwargs)
 
     def _deserialize(self, value, attr, data, **kwargs):
         if not isinstance(value, _Mapping):
@@ -1690,35 +1728,8 @@ class Mapping(Field[_MappingT], metaclass=abc.ABCMeta):
             return self.mapping_type(value)
 
         errors = collections.defaultdict(dict)
-
-        # Deserialize keys
-        if self.key_field is None:
-            keys = {k: k for k in value}
-        else:
-            keys = {}
-            for key in value:
-                try:
-                    keys[key] = self.key_field.deserialize(key, **kwargs)
-                except ValidationError as error:
-                    errors[key]["key"] = error.messages
-
-        # Deserialize values
-        result = self.mapping_type()
-        if self.value_field is None:
-            for k, v in value.items():
-                if k in keys:
-                    result[keys[k]] = v
-        else:
-            for key, val in value.items():
-                try:
-                    deser_val = self.value_field.deserialize(val, **kwargs)
-                except ValidationError as error:
-                    errors[key]["value"] = error.messages
-                    if error.valid_data is not None and key in keys:
-                        result[keys[key]] = error.valid_data
-                else:
-                    if key in keys:
-                        result[keys[key]] = deser_val
+        keys = self._deserialize_keys(value, errors, **kwargs)
+        result = self._deserialize_values(value, keys, errors, **kwargs)
 
         if errors:
             raise ValidationError(errors, valid_data=result)
@@ -1802,7 +1813,32 @@ class Email(String):
         self.validators.insert(0, validator)
 
 
-class IP(Field[ipaddress.IPv4Address | ipaddress.IPv6Address]):
+# Refactoring type: Extract Superclass (implemented as a shared mixin)
+# Change: Pulled up common init/serialize/deserialize logic for IP-like fields.
+class _BaseIPField:
+    DESERIALIZATION_CLASS: type | None = None
+    DESERIALIZE_FALLBACK: typing.Callable[[str], typing.Any]
+    _invalid_error_key: str
+    exploded: bool
+
+    def __init__(self, *, exploded: bool = False, **kwargs: Unpack[_BaseFieldKwargs]):
+        super().__init__(**kwargs)
+        self.exploded = exploded
+
+    def _serialize(self, value, attr, obj, **kwargs) -> str | None:
+        if value is None:
+            return None
+        return value.exploded if self.exploded else value.compressed
+
+    def _deserialize(self, value, attr, data, **kwargs):
+        try:
+            deserializer = self.DESERIALIZATION_CLASS or self.DESERIALIZE_FALLBACK
+            return deserializer(utils.ensure_text_type(value))
+        except (ValueError, TypeError) as error:
+            raise self.make_error(self._invalid_error_key) from error
+
+
+class IP(_BaseIPField, Field[ipaddress.IPv4Address | ipaddress.IPv6Address]):
     """A IP address field.
 
     :param exploded: If `True`, serialize ipv6 address in long form, ie. with groups
@@ -1813,28 +1849,8 @@ class IP(Field[ipaddress.IPv4Address | ipaddress.IPv6Address]):
 
     default_error_messages = {"invalid_ip": "Not a valid IP address."}
 
-    DESERIALIZATION_CLASS: type | None = None
-
-    def __init__(self, *, exploded: bool = False, **kwargs: Unpack[_BaseFieldKwargs]):
-        super().__init__(**kwargs)
-        self.exploded = exploded
-
-    def _serialize(self, value, attr, obj, **kwargs) -> str | None:
-        if value is None:
-            return None
-        if self.exploded:
-            return value.exploded
-        return value.compressed
-
-    def _deserialize(
-        self, value, attr, data, **kwargs
-    ) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
-        try:
-            return (self.DESERIALIZATION_CLASS or ipaddress.ip_address)(
-                utils.ensure_text_type(value)
-            )
-        except (ValueError, TypeError) as error:
-            raise self.make_error("invalid_ip") from error
+    DESERIALIZE_FALLBACK = ipaddress.ip_address
+    _invalid_error_key = "invalid_ip"
 
 
 class IPv4(IP):
@@ -1859,7 +1875,7 @@ class IPv6(IP):
     DESERIALIZATION_CLASS = ipaddress.IPv6Address
 
 
-class IPInterface(Field[ipaddress.IPv4Interface | ipaddress.IPv6Interface]):
+class IPInterface(_BaseIPField, Field[ipaddress.IPv4Interface | ipaddress.IPv6Interface]):
     """A IPInterface field.
 
     IP interface is the non-strict form of the IPNetwork type where arbitrary host
@@ -1875,28 +1891,8 @@ class IPInterface(Field[ipaddress.IPv4Interface | ipaddress.IPv6Interface]):
 
     default_error_messages = {"invalid_ip_interface": "Not a valid IP interface."}
 
-    DESERIALIZATION_CLASS: type | None = None
-
-    def __init__(self, *, exploded: bool = False, **kwargs: Unpack[_BaseFieldKwargs]):
-        super().__init__(**kwargs)
-        self.exploded = exploded
-
-    def _serialize(self, value, attr, obj, **kwargs) -> str | None:
-        if value is None:
-            return None
-        if self.exploded:
-            return value.exploded
-        return value.compressed
-
-    def _deserialize(
-        self, value, attr, data, **kwargs
-    ) -> ipaddress.IPv4Interface | ipaddress.IPv6Interface:
-        try:
-            return (self.DESERIALIZATION_CLASS or ipaddress.ip_interface)(
-                utils.ensure_text_type(value)
-            )
-        except (ValueError, TypeError) as error:
-            raise self.make_error("invalid_ip_interface") from error
+    DESERIALIZE_FALLBACK = ipaddress.ip_interface
+    _invalid_error_key = "invalid_ip_interface"
 
 
 class IPv4Interface(IPInterface):

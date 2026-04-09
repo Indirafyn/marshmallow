@@ -527,6 +527,85 @@ class Schema(metaclass=SchemaMeta):
             return error.valid_data or missing
         return value
 
+    # Refactoring type: Extract Method
+    # Change: Isolated `many=True` collection deserialization flow from `_deserialize`.
+    def _deserialize_many(
+        self,
+        data,
+        *,
+        error_store: ErrorStore,
+        partial,
+        unknown: types.UnknownOption,
+        index,
+    ) -> list[typing.Any]:
+        if not is_sequence_but_not_string(data):
+            error_store.store_error([self.error_messages["type"]], index=index)
+            return []
+        return [
+            self._deserialize(
+                item,
+                error_store=error_store,
+                many=False,
+                partial=partial,
+                unknown=unknown,
+                index=idx,
+            )
+            for idx, item in enumerate(data)
+        ]
+
+    # Refactoring type: Decompose Conditional
+    # Change: Consolidated missing-field skip decision to reduce nested branching.
+    def _should_skip_missing_field(
+        self, raw_value: typing.Any, *, partial, partial_is_collection: bool, attr_name: str
+    ) -> bool:
+        if raw_value is not missing:
+            return False
+        return partial is True or (partial_is_collection and attr_name in partial)
+
+    # Refactoring type: Decompose Conditional
+    # Change: Extracted partial kwargs branching for nested deserialization.
+    def _build_deserialize_kwargs(
+        self, *, partial, partial_is_collection: bool, attr_name: str
+    ) -> dict[str, typing.Any]:
+        if partial_is_collection:
+            prefix = f"{attr_name}."
+            len_prefix = len(prefix)
+            return {
+                "partial": [field[len_prefix:] for field in partial if field.startswith(prefix)]
+            }
+        if partial is not None:
+            return {"partial": partial}
+        return {}
+
+    # Refactoring type: Extract Method
+    # Change: Extracted unknown-field handling from `_deserialize`.
+    def _handle_unknown_fields(
+        self,
+        *,
+        data: Mapping[str, typing.Any],
+        unknown: types.UnknownOption,
+        ret_d: dict[str, typing.Any],
+        error_store: ErrorStore,
+        index,
+        index_errors: bool,
+    ) -> None:
+        if unknown == EXCLUDE:
+            return
+        fields = {
+            field_obj.data_key if field_obj.data_key is not None else field_name
+            for field_name, field_obj in self.load_fields.items()
+        }
+        for key in set(data) - fields:
+            value = data[key]
+            if unknown == INCLUDE:
+                ret_d[key] = value
+            elif unknown == RAISE:
+                error_store.store_error(
+                    [self.error_messages["unknown"]],
+                    key,
+                    (index if index_errors else None),
+                )
+
     def _serialize(self, obj: typing.Any, *, many: bool = False):
         """Serialize ``obj``.
 
@@ -623,22 +702,13 @@ class Schema(metaclass=SchemaMeta):
         index_errors = self.opts.index_errors
         index = index if index_errors else None
         if many:
-            if not is_sequence_but_not_string(data):
-                error_store.store_error([self.error_messages["type"]], index=index)
-                ret_l = []
-            else:
-                ret_l = [
-                    self._deserialize(
-                        d,
-                        error_store=error_store,
-                        many=False,
-                        partial=partial,
-                        unknown=unknown,
-                        index=idx,
-                    )
-                    for idx, d in enumerate(data)
-                ]
-            return ret_l
+            return self._deserialize_many(
+                data,
+                error_store=error_store,
+                partial=partial,
+                unknown=unknown,
+                index=index,
+            )
         ret_d = self.dict_class()
         # Check data is a dict
         if not isinstance(data, Mapping):
@@ -650,23 +720,18 @@ class Schema(metaclass=SchemaMeta):
                     field_obj.data_key if field_obj.data_key is not None else attr_name
                 )
                 raw_value = data.get(field_name, missing)
-                if raw_value is missing:
-                    # Ignore missing field if we're allowed to.
-                    if partial is True or (
-                        partial_is_collection and attr_name in partial
-                    ):
-                        continue
-                d_kwargs = {}
-                # Allow partial loading of nested schemas.
-                if partial_is_collection:
-                    prefix = attr_name + "."
-                    len_prefix = len(prefix)
-                    sub_partial = [
-                        f[len_prefix:] for f in partial if f.startswith(prefix)
-                    ]
-                    d_kwargs["partial"] = sub_partial
-                elif partial is not None:
-                    d_kwargs["partial"] = partial
+                if self._should_skip_missing_field(
+                    raw_value,
+                    partial=partial,
+                    partial_is_collection=partial_is_collection,
+                    attr_name=attr_name,
+                ):
+                    continue
+                d_kwargs = self._build_deserialize_kwargs(
+                    partial=partial,
+                    partial_is_collection=partial_is_collection,
+                    attr_name=attr_name,
+                )
 
                 def getter(
                     val, field_obj=field_obj, field_name=field_name, d_kwargs=d_kwargs
@@ -688,21 +753,14 @@ class Schema(metaclass=SchemaMeta):
                 if value is not missing:
                     key = field_obj.attribute or attr_name
                     set_value(ret_d, key, value)
-            if unknown != EXCLUDE:
-                fields = {
-                    field_obj.data_key if field_obj.data_key is not None else field_name
-                    for field_name, field_obj in self.load_fields.items()
-                }
-                for key in set(data) - fields:
-                    value = data[key]
-                    if unknown == INCLUDE:
-                        ret_d[key] = value
-                    elif unknown == RAISE:
-                        error_store.store_error(
-                            [self.error_messages["unknown"]],
-                            key,
-                            (index if index_errors else None),
-                        )
+            self._handle_unknown_fields(
+                data=data,
+                unknown=unknown,
+                ret_d=ret_d,
+                error_store=error_store,
+                index=index,
+                index_errors=index_errors,
+            )
         return ret_d
 
     def load(
